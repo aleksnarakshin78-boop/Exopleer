@@ -56,7 +56,7 @@ class MainActivity : ComponentActivity() {
             .build()
 
         player = ExoPlayer.Builder(this).build().apply {
-            setAudioAttributes(audioAttributes, false)
+            setAudioAttributes(audioAttributes, true)
         }
 
         mediaSession = MediaSession.Builder(this, player).build()
@@ -292,7 +292,7 @@ fun PlayerScreen(player: ExoPlayer?, tracks: List<AudioTrack>) {
                 },
                 modifier = Modifier.padding(horizontal = 16.dp).height(50.dp)
             ) {
-                Text(if (isPlaying) "ПАУЗА" else "ИГРАТЬ")
+                Text(if (isPlaying) "pause" else "play")
             }
 
             Button(
