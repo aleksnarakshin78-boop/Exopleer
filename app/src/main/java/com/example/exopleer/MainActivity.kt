@@ -31,11 +31,12 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.delay
-
+import androidx.media3.session.MediaSession
 data class AudioTrack(val uri: Uri, val title: String, val durationMs: Long, val durationStr: String)
 
 class MainActivity : ComponentActivity() {
-    private var player: ExoPlayer? = null
+    private lateinit var player: ExoPlayer // Сделали lateinit вместо null-safe
+    private lateinit var mediaSession: MediaSession // НАШЕ ДОБАВЛЕНИЕ
     private val tracksState = mutableStateOf<List<AudioTrack>>(emptyList())
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -48,14 +49,26 @@ class MainActivity : ComponentActivity() {
             startService(serviceIntent)
         }
 
+
+
+
+
+        player = ExoPlayer.Builder(this).build().apply {
+            setAudioAttributes(audioAttributes, false)
+        }
+
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
 
+        // 1. Сначала создаем плеер
         player = ExoPlayer.Builder(this).build().apply {
             setAudioAttributes(audioAttributes, false)
         }
+
+        // 2. И только теперь привязываем к нему MediaSession
+        mediaSession = MediaSession.Builder(this, player).build()
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
