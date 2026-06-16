@@ -30,13 +30,14 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
-import kotlinx.coroutines.delay
 import androidx.media3.session.MediaSession
+import kotlinx.coroutines.delay
+
 data class AudioTrack(val uri: Uri, val title: String, val durationMs: Long, val durationStr: String)
 
 class MainActivity : ComponentActivity() {
-    private lateinit var player: ExoPlayer // Сделали lateinit вместо null-safe
-    private lateinit var mediaSession: MediaSession // НАШЕ ДОБАВЛЕНИЕ
+    private lateinit var player: ExoPlayer
+    private lateinit var mediaSession: MediaSession
     private val tracksState = mutableStateOf<List<AudioTrack>>(emptyList())
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -49,25 +50,15 @@ class MainActivity : ComponentActivity() {
             startService(serviceIntent)
         }
 
-
-
-
-
-        player = ExoPlayer.Builder(this).build().apply {
-            setAudioAttributes(audioAttributes, false)
-        }
-
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
 
-        // 1. Сначала создаем плеер
         player = ExoPlayer.Builder(this).build().apply {
             setAudioAttributes(audioAttributes, false)
         }
 
-        // 2. И только теперь привязываем к нему MediaSession
         mediaSession = MediaSession.Builder(this, player).build()
 
         setContent {
@@ -152,7 +143,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        player?.release()
+        mediaSession.release()
+        player.release()
     }
 }
 
@@ -162,7 +154,7 @@ fun PlayerScreen(player: ExoPlayer?, tracks: List<AudioTrack>) {
     var isPlaying by remember { mutableStateOf(false) }
     var currentPosition by remember { mutableStateOf(0L) }
     var totalDuration by remember { mutableStateOf(0L) }
-    // Функция для перевода миллисекунд в формат "02:30"
+
     fun formatTime(ms: Long): String {
         val totalSeconds = ms / 1000
         val minutes = totalSeconds / 60
@@ -170,7 +162,6 @@ fun PlayerScreen(player: ExoPlayer?, tracks: List<AudioTrack>) {
         return String.format("%02d:%02d", minutes, seconds)
     }
 
-    // 1. Загружаем ВСЮ пачку треков в ExoPlayer один раз при старте
     LaunchedEffect(tracks, player) {
         if (player != null && tracks.isNotEmpty()) {
             player.clearMediaItems()
@@ -180,7 +171,6 @@ fun PlayerScreen(player: ExoPlayer?, tracks: List<AudioTrack>) {
         }
     }
 
-    // 2. Функция переключения трека (просто прыгаем по системной очереди плеера)
     fun playTrack(index: Int) {
         if (player != null && index in tracks.indices) {
             currentIndex = index
@@ -189,16 +179,13 @@ fun PlayerScreen(player: ExoPlayer?, tracks: List<AudioTrack>) {
             isPlaying = true
         }
     }
-// 3. Обновление прогресс-бара и индекса трека раз в секунду (БЕЗ желтой подсветки!)
+
     LaunchedEffect(isPlaying) {
         if (!isPlaying) return@LaunchedEffect
-
         while (true) {
             if (player != null) {
                 currentPosition = player.currentPosition
                 totalDuration = player.duration.coerceAtLeast(0L)
-
-                // Проверяем актуальность индекса трека
                 if (player.currentMediaItemIndex != currentIndex && player.currentMediaItemIndex in tracks.indices) {
                     currentIndex = player.currentMediaItemIndex
                 }
@@ -207,10 +194,8 @@ fun PlayerScreen(player: ExoPlayer?, tracks: List<AudioTrack>) {
         }
     }
 
-    // 4. Ловим автоматический переход на следующий трек и синхронизируем плеер с интерфейсом
     DisposableEffect(player) {
         if (player == null) return@DisposableEffect onDispose {}
-
         val listener = object : Player.Listener {
             override fun onEvents(player: Player, events: Player.Events) {
                 if (player.currentMediaItemIndex in tracks.indices) {
@@ -219,23 +204,15 @@ fun PlayerScreen(player: ExoPlayer?, tracks: List<AudioTrack>) {
                 isPlaying = player.isPlaying
             }
         }
-
         player.addListener(listener)
-
-        // Синхронизируем состояние при первом запуске эффекта
         if (player.currentMediaItemIndex in tracks.indices) {
             currentIndex = player.currentMediaItemIndex
         }
         isPlaying = player.isPlaying
-
-        onDispose {
-            player.removeListener(listener)
-        }
+        onDispose { player.removeListener(listener) }
     }
 
-    // Никаких лишних onDispose или скобок здесь быть не должно! Сразу идет Column:
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        // Список треков
         LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
             itemsIndexed(tracks) { index, track ->
                 val isCurrent = index == currentIndex
@@ -265,7 +242,6 @@ fun PlayerScreen(player: ExoPlayer?, tracks: List<AudioTrack>) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // НАЗВАНИЕ ТРЕКА И ТАЙМЕРЫ (Показываются, только если трек выбран)
         if (currentIndex in tracks.indices) {
             Text(
                 text = "Сейчас играет: ${tracks[currentIndex].title}",
@@ -275,20 +251,15 @@ fun PlayerScreen(player: ExoPlayer?, tracks: List<AudioTrack>) {
                 modifier = Modifier.padding(bottom = 4.dp)
             )
 
-            // Прогресс-бар (Слайдер) — Простой уменьшенный вариант
-            // Тонкий и аккуратный прогресс-бар вместо громоздкого слайдера
             val progressFactor = if (totalDuration > 0) currentPosition.toFloat() / totalDuration.toFloat() else 0f
 
-            androidx.compose.material3.LinearProgressIndicator(
+            LinearProgressIndicator(
                 progress = { progressFactor.coerceIn(0f, 1f) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(4.dp) // Вот оно, наше значение! Делаем полосочку тонкой и аккуратной
-                    .padding(vertical = 0.dp),
+                modifier = Modifier.fillMaxWidth().height(4.dp),
                 color = Color.Green,
                 trackColor = Color.Gray
             )
-            // Строка времени: Текущее положение (слева) / Общая длина (справа)
+
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween
@@ -300,13 +271,11 @@ fun PlayerScreen(player: ExoPlayer?, tracks: List<AudioTrack>) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Кнопки управления (Оставляем без изменений)
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
         ) {
-            // Кнопка НАЗАД
             Button(
                 onClick = { if (currentIndex > 0) playTrack(currentIndex - 1) },
                 modifier = Modifier.padding(8.dp)
@@ -314,16 +283,11 @@ fun PlayerScreen(player: ExoPlayer?, tracks: List<AudioTrack>) {
                 Text("◀◀")
             }
 
-            // Кнопка ИГРАТЬ / ПАУЗА
             Button(
                 onClick = {
                     if (player != null && currentIndex in tracks.indices) {
-                        if (isPlaying) {
-                            player.pause()
-                        } else {
-                            player.play()
-                        }
-                        isPlaying = !isPlaying
+                        if (isPlaying) player.pause() else player.play()
+                        isPlaying = player.isPlaying
                     }
                 },
                 modifier = Modifier.padding(horizontal = 16.dp).height(50.dp)
@@ -331,7 +295,6 @@ fun PlayerScreen(player: ExoPlayer?, tracks: List<AudioTrack>) {
                 Text(if (isPlaying) "ПАУЗА" else "ИГРАТЬ")
             }
 
-            // Кнопка ВПЕРЕД
             Button(
                 onClick = { if (currentIndex + 1 < tracks.size) playTrack(currentIndex + 1) },
                 modifier = Modifier.padding(8.dp)
