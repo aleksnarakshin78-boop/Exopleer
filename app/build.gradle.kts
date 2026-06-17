@@ -39,10 +39,9 @@ android {
 
 dependencies {
     // Библиотеки для работы фонового сервиса и шторки уведомлений
-    implementation("androidx.media3:media3-session:1.3.1")
-// Библиотека для корректного выравнивания (Alignment) в Compose
-    implementation("androidx.compose.ui:ui:1.6.8")
+    implementation("androidx.media3:media3-session:1.5.1")
     implementation("androidx.media3:media3-exoplayer:1.5.1")
+    implementation("androidx.media3:media3-common:1.5.1")
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)

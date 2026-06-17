@@ -1,6 +1,7 @@
 package com.example.exopleer
 
 import android.Manifest
+import android.content.ComponentName
 import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -25,24 +26,27 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import androidx.media3.common.AudioAttributes
-import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.session.MediaSession
+import androidx.media3.session.MediaController
+import androidx.media3.session.SessionToken
+import com.google.common.util.concurrent.ListenableFuture
+import com.google.common.util.concurrent.MoreExecutors
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 data class AudioTrack(val uri: Uri, val title: String, val durationMs: Long, val durationStr: String)
 
 class MainActivity : ComponentActivity() {
-    private lateinit var player: ExoPlayer
-    private lateinit var mediaSession: MediaSession
+    private var controllerFuture: ListenableFuture<MediaController>? = null
+    private val playerState = mutableStateOf<Player?>(null)
     private val tracksState = mutableStateOf<List<AudioTrack>>(emptyList())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Запуск сервиса
         val serviceIntent = Intent(this, MediaService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(serviceIntent)
@@ -50,16 +54,12 @@ class MainActivity : ComponentActivity() {
             startService(serviceIntent)
         }
 
-        val audioAttributes = AudioAttributes.Builder()
-            .setUsage(C.USAGE_MEDIA)
-            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
-            .build()
-
-        player = ExoPlayer.Builder(this).build().apply {
-            setAudioAttributes(audioAttributes, true)
-        }
-
-        mediaSession = MediaSession.Builder(this, player).build()
+        // Подключение к MediaSession через MediaController
+        val sessionToken = SessionToken(this, ComponentName(this, MediaService::class.java))
+        controllerFuture = MediaController.Builder(this, sessionToken).buildAsync()
+        controllerFuture?.addListener({
+            playerState.value = controllerFuture?.get()
+        }, MoreExecutors.directExecutor())
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
@@ -74,7 +74,8 @@ class MainActivity : ComponentActivity() {
                     ) { isGranted ->
                         hasPermission = isGranted
                         if (isGranted) {
-                            tracksState.value = loadAudioFiles()
+                            // После получения разрешения загружаем файлы
+                            // Мы не можем запустить LaunchedEffect здесь напрямую, но hasPermission изменится
                         }
                     }
 
@@ -82,7 +83,7 @@ class MainActivity : ComponentActivity() {
                         LaunchedEffect(Unit) {
                             tracksState.value = loadAudioFiles()
                         }
-                        PlayerScreen(player = player, tracks = tracksState.value)
+                        PlayerScreen(player = playerState.value, tracks = tracksState.value)
                     } else {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = androidx.compose.ui.Alignment.Center) {
                             Button(onClick = {
@@ -107,7 +108,7 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
     ) == PackageManager.PERMISSION_GRANTED
 
-    private fun loadAudioFiles(): List<AudioTrack> {
+    private suspend fun loadAudioFiles(): List<AudioTrack> = withContext(Dispatchers.IO) {
         val trackList = mutableListOf<AudioTrack>()
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
@@ -138,22 +139,23 @@ class MainActivity : ComponentActivity() {
                 trackList.add(AudioTrack(uri, title, durationMs, durationStr))
             }
         }
-        return trackList
+        trackList
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        mediaSession.release()
-        player.release()
+        controllerFuture?.let {
+            MediaController.releaseFuture(it)
+        }
     }
 }
 
 @Composable
-fun PlayerScreen(player: ExoPlayer?, tracks: List<AudioTrack>) {
-    var currentIndex by remember { mutableStateOf(-1) }
+fun PlayerScreen(player: Player?, tracks: List<AudioTrack>) {
+    var currentIndex by remember { mutableIntStateOf(-1) }
     var isPlaying by remember { mutableStateOf(false) }
-    var currentPosition by remember { mutableStateOf(0L) }
-    var totalDuration by remember { mutableStateOf(0L) }
+    var currentPosition by remember { mutableLongStateOf(0L) }
+    var totalDuration by remember { mutableLongStateOf(0L) }
 
     fun formatTime(ms: Long): String {
         val totalSeconds = ms / 1000
@@ -162,53 +164,51 @@ fun PlayerScreen(player: ExoPlayer?, tracks: List<AudioTrack>) {
         return String.format("%02d:%02d", minutes, seconds)
     }
 
+    // Синхронизация списка треков с плеером
     LaunchedEffect(tracks, player) {
-        if (player != null && tracks.isNotEmpty()) {
-            player.clearMediaItems()
+        if (player != null && tracks.isNotEmpty() && player.mediaItemCount == 0) {
             val mediaItems = tracks.map { MediaItem.fromUri(it.uri) }
-            player.addMediaItems(mediaItems)
+            player.setMediaItems(mediaItems)
             player.prepare()
         }
     }
 
     fun playTrack(index: Int) {
         if (player != null && index in tracks.indices) {
-            currentIndex = index
             player.seekTo(index, 0L)
             player.play()
-            isPlaying = true
         }
     }
 
-    LaunchedEffect(isPlaying) {
-        if (!isPlaying) return@LaunchedEffect
+    // Периодическое обновление позиции прогресса
+    LaunchedEffect(player, isPlaying) {
+        if (player == null) return@LaunchedEffect
         while (true) {
-            if (player != null) {
-                currentPosition = player.currentPosition
-                totalDuration = player.duration.coerceAtLeast(0L)
-                if (player.currentMediaItemIndex != currentIndex && player.currentMediaItemIndex in tracks.indices) {
-                    currentIndex = player.currentMediaItemIndex
-                }
-            }
+            currentPosition = player.currentPosition
+            totalDuration = player.duration.coerceAtLeast(0L)
+            currentIndex = player.currentMediaItemIndex
             delay(1000L)
         }
     }
 
+    // Слушатель событий плеера для мгновенного обновления UI
     DisposableEffect(player) {
         if (player == null) return@DisposableEffect onDispose {}
         val listener = object : Player.Listener {
             override fun onEvents(player: Player, events: Player.Events) {
-                if (player.currentMediaItemIndex in tracks.indices) {
-                    currentIndex = player.currentMediaItemIndex
-                }
+                currentIndex = player.currentMediaItemIndex
                 isPlaying = player.isPlaying
+                currentPosition = player.currentPosition
+                totalDuration = player.duration.coerceAtLeast(0L)
             }
         }
         player.addListener(listener)
-        if (player.currentMediaItemIndex in tracks.indices) {
-            currentIndex = player.currentMediaItemIndex
-        }
+        // Инициализация начальных значений
+        currentIndex = player.currentMediaItemIndex
         isPlaying = player.isPlaying
+        currentPosition = player.currentPosition
+        totalDuration = player.duration.coerceAtLeast(0L)
+        
         onDispose { player.removeListener(listener) }
     }
 
@@ -285,9 +285,8 @@ fun PlayerScreen(player: ExoPlayer?, tracks: List<AudioTrack>) {
 
             Button(
                 onClick = {
-                    if (player != null && currentIndex in tracks.indices) {
-                        if (isPlaying) player.pause() else player.play()
-                        isPlaying = player.isPlaying
+                    if (player != null) {
+                        if (player.isPlaying) player.pause() else player.play()
                     }
                 },
                 modifier = Modifier.padding(horizontal = 16.dp).height(50.dp)

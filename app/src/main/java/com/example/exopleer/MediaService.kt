@@ -3,6 +3,7 @@ package com.example.exopleer
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.content.pm.ServiceInfo
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.media3.common.AudioAttributes
@@ -23,7 +24,7 @@ class MediaService : MediaSessionService() {
                 .setUsage(C.USAGE_MEDIA)
                 .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
                 .build()
-            setAudioAttributes(audioAttributes, false)
+            setAudioAttributes(audioAttributes, true)
         }
 
         mediaSession = MediaSession.Builder(this, player!!).build()
@@ -31,13 +32,17 @@ class MediaService : MediaSessionService() {
         createNotificationChannel()
         val notification = NotificationCompat.Builder(this, "media_channel")
             .setSmallIcon(android.R.drawable.ic_media_play)
-            .setContentTitle("ExoPleer работает в фоне")
-            .setContentText("Музыка не выключится при записи видео")
+            .setContentTitle("ExoPleer")
+            .setContentText("Воспроизведение музыки")
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
             .build()
 
-        startForeground(1, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+        } else {
+            startForeground(1, notification)
+        }
     }
 
     private fun createNotificationChannel() {
