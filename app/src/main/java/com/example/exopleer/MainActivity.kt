@@ -10,21 +10,31 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
@@ -34,7 +44,9 @@ import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 
 data class AudioTrack(val uri: Uri, val title: String, val durationMs: Long, val durationStr: String)
 
@@ -46,15 +58,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Запуск сервиса
         val serviceIntent = Intent(this, MediaService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent)
-        } else {
-            startService(serviceIntent)
-        }
+        startService(serviceIntent)
 
-        // Подключение к MediaSession через MediaController
         val sessionToken = SessionToken(this, ComponentName(this, MediaService::class.java))
         controllerFuture = MediaController.Builder(this, sessionToken).buildAsync()
         controllerFuture?.addListener({
@@ -73,10 +79,6 @@ class MainActivity : ComponentActivity() {
                         contract = ActivityResultContracts.RequestPermission()
                     ) { isGranted ->
                         hasPermission = isGranted
-                        if (isGranted) {
-                            // После получения разрешения загружаем файлы
-                            // Мы не можем запустить LaunchedEffect здесь напрямую, но hasPermission изменится
-                        }
                     }
 
                     if (hasPermission) {
@@ -85,7 +87,7 @@ class MainActivity : ComponentActivity() {
                         }
                         PlayerScreen(player = playerState.value, tracks = tracksState.value)
                     } else {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = androidx.compose.ui.Alignment.Center) {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Button(onClick = {
                                 val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                     Manifest.permission.READ_MEDIA_AUDIO
@@ -156,15 +158,38 @@ fun PlayerScreen(player: Player?, tracks: List<AudioTrack>) {
     var isPlaying by remember { mutableStateOf(false) }
     var currentPosition by remember { mutableLongStateOf(0L) }
     var totalDuration by remember { mutableLongStateOf(0L) }
+    
+    var showPlaylist by remember { mutableStateOf(false) }
+
+    // Таймер отсрочки
+    val scope = rememberCoroutineScope()
+    var countdown by remember { mutableIntStateOf(0) }
+
+    // Конфигурация для кастомной шторки
+    val configuration = LocalConfiguration.current
+    val screenHeight = configuration.screenHeightDp.dp
+    val sheetHeight = screenHeight * 0.7f
+    
+    // Анимация выплывания (длительность 2000мс для экстремально плавного эффекта)
+    val offsetY by animateDpAsState(
+        targetValue = if (showPlaylist) 0.dp else sheetHeight,
+        animationSpec = tween(durationMillis = 6000),
+        label = "SheetAnimation"
+    )
+    
+    val scrimAlpha by animateFloatAsState(
+        targetValue = if (showPlaylist) 0.6f else 0f,
+        animationSpec = tween(durationMillis = 6000),
+        label = "ScrimAnimation"
+    )
 
     fun formatTime(ms: Long): String {
         val totalSeconds = ms / 1000
         val minutes = totalSeconds / 60
         val seconds = totalSeconds % 60
-        return String.format("%02d:%02d", minutes, seconds)
+        return String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
     }
 
-    // Синхронизация списка треков с плеером
     LaunchedEffect(tracks, player) {
         if (player != null && tracks.isNotEmpty() && player.mediaItemCount == 0) {
             val mediaItems = tracks.map { MediaItem.fromUri(it.uri) }
@@ -180,7 +205,6 @@ fun PlayerScreen(player: Player?, tracks: List<AudioTrack>) {
         }
     }
 
-    // Периодическое обновление позиции прогресса
     LaunchedEffect(player, isPlaying) {
         if (player == null) return@LaunchedEffect
         while (true) {
@@ -191,7 +215,6 @@ fun PlayerScreen(player: Player?, tracks: List<AudioTrack>) {
         }
     }
 
-    // Слушатель событий плеера для мгновенного обновления UI
     DisposableEffect(player) {
         if (player == null) return@DisposableEffect onDispose {}
         val listener = object : Player.Listener {
@@ -203,103 +226,212 @@ fun PlayerScreen(player: Player?, tracks: List<AudioTrack>) {
             }
         }
         player.addListener(listener)
-        // Инициализация начальных значений
         currentIndex = player.currentMediaItemIndex
         isPlaying = player.isPlaying
         currentPosition = player.currentPosition
         totalDuration = player.duration.coerceAtLeast(0L)
-        
         onDispose { player.removeListener(listener) }
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            itemsIndexed(tracks) { index, track ->
-                val isCurrent = index == currentIndex
-                Box(
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Контент плеера
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(24.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(260.dp)
+                    .background(Color(0xFF1E1E1E), RoundedCornerShape(16.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = if (countdown > 0) countdown.toString() else "🎵",
+                    fontSize = if (countdown > 0) 80.sp else 100.sp,
+                    color = if (countdown > 0) Color.Green else Color.White
+                )
+            }
+
+            Spacer(modifier = Modifier.height(32.dp))
+
+            Text(
+                text = if (currentIndex in tracks.indices) tracks[currentIndex].title else "Выберите трек",
+                color = Color.White,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(32.dp))
+
+            if (currentIndex in tracks.indices) {
+                Column(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp)
-                        .background(
-                            if (isCurrent) Color(0xFF1E3A8A) else Color(0xFF1E1E1E),
-                            shape = RoundedCornerShape(8.dp)
-                        )
-                        .clickable { playTrack(index) }
-                        .padding(16.dp)
+                        .fillMaxWidth(0.85f)
+                        .padding(vertical = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Column {
-                        Text(
-                            text = track.title,
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                    val progressFactor = if (totalDuration > 0) currentPosition.toFloat() / totalDuration.toFloat() else 0f
+                    Slider(
+                        value = progressFactor,
+                        onValueChange = { 
+                            player?.seekTo((it * totalDuration).toLong())
+                        },
+                        modifier = Modifier.height(20.dp),
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color.Green,
+                            activeTrackColor = Color.Green,
+                            inactiveTrackColor = Color.Gray.copy(alpha = 0.3f)
                         )
-                        Text(text = track.durationStr, color = Color.Gray)
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(text = formatTime(currentPosition), color = Color.Gray, fontSize = 11.sp)
+                        Text(text = formatTime(totalDuration), color = Color.Gray, fontSize = 11.sp)
                     }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Button(
+                onClick = {
+                    if (countdown == 0) {
+                        scope.launch {
+                            countdown = 5
+                            while (countdown > 0) {
+                                delay(1000)
+                                countdown--
+                            }
+                            player?.play()
+                        }
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (countdown > 0) Color.Green.copy(alpha = 0.2f) else Color(0xFF1E1E1E)
+                ),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Text(if (countdown > 0) "Запуск через $countdown..." else "⏳ +5 сек отсрочка", color = Color.White)
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = { if (currentIndex > 0) playTrack(currentIndex - 1) }) {
+                    Text("◀◀", color = Color.White, fontSize = 24.sp)
+                }
+
+                Button(
+                    onClick = { if (player?.isPlaying == true) player.pause() else player?.play() },
+                    modifier = Modifier.size(70.dp),
+                    shape = RoundedCornerShape(35.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.White)
+                ) {
+                    Text(if (isPlaying) "||" else "▶", color = Color.Black, fontSize = 24.sp)
+                }
+
+                IconButton(onClick = { if (currentIndex + 1 < tracks.size) playTrack(currentIndex + 1) }) {
+                    Text("▶▶", color = Color.White, fontSize = 24.sp)
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
-
-        if (currentIndex in tracks.indices) {
-            Text(
-                text = "Сейчас играет: ${tracks[currentIndex].title}",
-                color = Color.Green,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(bottom = 4.dp)
-            )
-
-            val progressFactor = if (totalDuration > 0) currentPosition.toFloat() / totalDuration.toFloat() else 0f
-
-            LinearProgressIndicator(
-                progress = { progressFactor.coerceIn(0f, 1f) },
-                modifier = Modifier.fillMaxWidth().height(4.dp),
-                color = Color.Green,
-                trackColor = Color.Gray
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(text = formatTime(currentPosition), color = Color.Gray)
-                Text(text = formatTime(totalDuration), color = Color.Gray)
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+        // Кнопка плейлиста
+        Button(
+            onClick = { showPlaylist = true },
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(16.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent)
         ) {
-            Button(
-                onClick = { if (currentIndex > 0) playTrack(currentIndex - 1) },
-                modifier = Modifier.padding(8.dp)
-            ) {
-                Text("◀◀")
-            }
+            Text("☰", color = Color.White, fontSize = 24.sp)
+        }
 
-            Button(
-                onClick = {
-                    if (player != null) {
-                        if (player.isPlaying) player.pause() else player.play()
+        // --- КАСТОМНАЯ ШТОРКА ---
+        
+        // Затемнение фона
+        if (scrimAlpha > 0f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = scrimAlpha))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { showPlaylist = false }
+            )
+        }
+
+        // Панель плейлиста
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(sheetHeight)
+                .align(Alignment.BottomCenter)
+                .offset(y = offsetY)
+                .background(Color(0xFF1E1E1E), RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
+                .clickable(enabled = false) {} // Чтобы клики внутри не закрывали шторку
+        ) {
+            Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+                // Полоска-индикатор сверху шторки
+                Box(
+                    modifier = Modifier
+                        .width(40.dp)
+                        .height(4.dp)
+                        .background(Color.Gray.copy(alpha = 0.5f), RoundedCornerShape(2.dp))
+                        .align(Alignment.CenterHorizontally)
+                )
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                Text(
+                    "Плейлист",
+                    color = Color.White,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(bottom = 16.dp)
+                )
+                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    itemsIndexed(tracks) { index, track ->
+                        val isCurrent = index == currentIndex
+                        ListItem(
+                            headlineContent = { 
+                                Text(
+                                    track.title, 
+                                    color = if (isCurrent) Color.Green else Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                ) 
+                            },
+                            supportingContent = { Text(track.durationStr, color = Color.Gray) },
+                            modifier = Modifier
+                                .clickable { 
+                                    playTrack(index)
+                                    showPlaylist = false
+                                }
+                                .background(if (isCurrent) Color.White.copy(alpha = 0.05f) else Color.Transparent),
+                            colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                        )
                     }
-                },
-                modifier = Modifier.padding(horizontal = 16.dp).height(50.dp)
-            ) {
-                Text(if (isPlaying) "pause" else "play")
-            }
-
-            Button(
-                onClick = { if (currentIndex + 1 < tracks.size) playTrack(currentIndex + 1) },
-                modifier = Modifier.padding(8.dp)
-            ) {
-                Text("▶▶")
+                }
             }
         }
+    }
+
+    // Обработка кнопки "Назад" для закрытия шторки
+    if (showPlaylist) {
+        BackHandler { showPlaylist = false }
     }
 }
