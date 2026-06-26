@@ -8,6 +8,7 @@ import android.media.AudioAttributes as AndroidAudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
+import android.os.Bundle
 import androidx.core.app.NotificationCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -25,6 +26,28 @@ class MediaService : MediaSessionService() {
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             updateNotification(isPlaying)
+        }
+
+        @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+        override fun onAudioSessionIdChanged(audioSessionId: Int) {
+            sendIdToController(audioSessionId)
+        }
+
+        @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            if (playbackState == Player.STATE_READY) {
+                player?.let { sendIdToController(it.audioSessionId) }
+            }
+        }
+    }
+
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    private fun sendIdToController(id: Int) {
+        if (id != 0) {
+            val extras = Bundle().apply {
+                putInt("audio_session_id", id)
+            }
+            mediaSession?.setSessionExtras(extras)
         }
     }
 
@@ -65,7 +88,7 @@ class MediaService : MediaSessionService() {
             .setContentTitle("ExoPleer")
             .setContentText(if (isPlaying) "Воспроизведение музыки" else "Пауза")
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setOngoing(isPlaying) // Закреплено только при игре
+            .setOngoing(isPlaying)
             .build()
 
         if (isPlaying) {
@@ -75,7 +98,6 @@ class MediaService : MediaSessionService() {
                 startForeground(1, notification)
             }
         } else {
-            // Разрешаем смахнуть уведомление, когда музыка на паузе
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_DETACH)
             } else {
